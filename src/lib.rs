@@ -1,11 +1,28 @@
-#![feature(macro_rules)]
+#![feature(plugin_registrar, rustc_private)]
+#![feature(libc)]
+
 
 extern crate libc;
-extern crate core;
+extern crate syntax;
+extern crate rustc;
 
-use core::cell::UnsafeCell;
-use core::kinds::marker::InvariantLifetime;
+use std::cell::{Cell,UnsafeCell};
+use std::marker::{PhantomFn,PhantomData};
 use libc::{c_int, c_void, size_t};
+
+use rustc::plugin::Registry;
+use syntax::ext::base::{Modifier};
+use syntax::parse::token::intern;
+use syntax::ast_map::blocks::MaybeFnLike;
+use syntax::abi;
+
+use syntax::ext::base::ExtCtxt;
+use syntax::codemap::Span;
+use syntax::ptr::P;
+use syntax::ast::{Item, MetaItem};
+use syntax::ast;
+use syntax::attr;
+use syntax::parse::token::InternedString;
 
 pub const FUNC_MAX_ARGS: c_int = 100;
 
@@ -14,7 +31,7 @@ type fmNodePtr = *mut c_void;
 type fmAggrefPtr = *mut c_void;
 
 /// A trait that is implemented for all Postgres-compatible data types.
-trait PgType {}
+trait PgType : PhantomFn<Self> {}
 
 impl PgType for i16 {}
 impl PgType for bool {}
@@ -39,7 +56,7 @@ extern {
 /// https://github.com/postgres/postgres/blob/master/src/include/c.h#L391
 #[repr(C)]
 pub struct Varlena {
-    len: [i8, ..4],
+    len: [i8; 4],
     data: *mut i8
 }
 
@@ -71,7 +88,7 @@ pub struct PgVector<T> {
     elemtype: c_void,
     dim1: c_int,
     lbound1: c_int,
-    values: [T, ..1]
+    values: [T; 1]
 }
 
 impl<T> PgVector<T>
@@ -458,20 +475,20 @@ pub struct FunctionCallInfoData {
     fn_collation: c_void,
     is_null: bool,
     nargs: u16,
-    arg: [Datum, ..FUNC_MAX_ARGS as uint],
-    argnull: [bool, ..FUNC_MAX_ARGS as uint]
+    arg: [Datum; FUNC_MAX_ARGS as usize],
+    argnull: [bool; FUNC_MAX_ARGS as usize]
 }
 
 pub struct FunctionCallInfo<'a> {
     ptr: *mut FunctionCallInfoData,
-    marker: InvariantLifetime<'a>
+    marker: PhantomData<Cell<&'a ()>>
 }
 
 /// A wrapper around a Postgres `Datum`. A datum is simply
 /// a pointer-sized unsigned integer that acts like
 /// a pointer.
 pub struct Datum {
-    val: uint
+    val: usize
 }
 
 impl Datum {
@@ -491,7 +508,7 @@ impl Datum {
 
 pub struct DatumPtr<'a> {
     ptr: UnsafeCell<Datum>,
-    marker: InvariantLifetime<'a>
+    marker: PhantomData<Cell<&'a ()>>
 }
 
 /// The magic metadata that Postgres will ready by calling
@@ -509,3 +526,78 @@ pub struct Pg_magic_struct {
 }
 
 
+#[plugin_registrar]
+pub fn plugin_registrar(reg: &mut Registry) {
+    reg.register_syntax_extension(intern("pg_export"), Modifier(Box::new(expand_pg_export)));
+}
+
+pub fn expand_pg_export(cx: &mut ExtCtxt, span: Span, _: &MetaItem, item: P<Item>) -> P<Item> {
+    let mut func = (*item).clone();
+
+    if !func.is_fn_like() {
+        cx.span_err(span, "you can only export a function to PostgreSQL.");
+    }
+
+    func.attrs.push(attr::mk_attr_outer(attr::mk_attr_id(), attr::mk_word_item(InternedString::new("no_mangle"))));
+
+    match (*item).node {
+        ast::ItemFn(_, _, mut _abi, _, _) => {
+            _abi = abi::C;
+        },
+        _ => {}
+    }
+
+    P(func)
+}
+
+/// Postgres has a macro called `PG_MODULE_MAGIC` that is supposed
+/// to be called within extensions. This generates a bunch
+/// of metadata structures that Postgres reads to determine
+/// the compatibility of the extension.
+///
+/// `Pg_magic_func` is the function Postgres will call
+/// to check compatibility with memcmp, so there can't be
+/// any alignment differences.
+///
+/// Usage:
+///
+/// ```notrust
+/// pg_module!(90500)
+/// ```
+#[macro_export]
+macro_rules! pg_module {
+    (version: $vers:expr) => {
+        static mut Pg_magic_data: postgres_extension::Pg_magic_struct =
+            postgres_extension::Pg_magic_struct {
+                len: 0 as c_int,
+                version: $vers,
+                funcmaxargs: 100,
+                indexmaxkeys: 32,
+                nameddatalen: 64,
+                float4byval: 1,
+                float8byval: 1
+            };
+
+
+        #[no_mangle]
+        #[allow(non_snake_case)]
+        pub extern fn Pg_magic_func() -> &'static postgres_extension::Pg_magic_struct {
+            use std::mem::size_of;
+            use libc::{c_int};
+
+            unsafe {
+                Pg_magic_data = postgres_extension::Pg_magic_struct {
+                    len: size_of::<postgres_extension::Pg_magic_struct>() as c_int,
+                    version: $vers / 100,
+                    funcmaxargs: 100,
+                    indexmaxkeys: 32,
+                    nameddatalen: 64,
+                    float4byval: 1,
+                    float8byval: 1
+                };
+
+                &Pg_magic_data
+            }
+        }
+    }
+}

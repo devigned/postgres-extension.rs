@@ -11,6 +11,3 @@ crate-type = ["dylib"]
 
 [dependencies.postgres_extension]
 path = "../../"
-
-[dependencies.postgres_extension_macros]
-path = "../../macros"
