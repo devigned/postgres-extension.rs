@@ -8,6 +8,7 @@ extern crate rustc;
 
 use std::cell::{Cell,UnsafeCell};
 use std::marker::{PhantomFn,PhantomData};
+use std::marker::{MarkerTrait};
 use libc::{c_int, c_void, size_t};
 
 use rustc::plugin::Registry;
@@ -31,7 +32,7 @@ type fmNodePtr = *mut c_void;
 type fmAggrefPtr = *mut c_void;
 
 /// A trait that is implemented for all Postgres-compatible data types.
-trait PgType : PhantomFn<Self> {}
+trait PgType : MarkerTrait {}
 
 impl PgType for i16 {}
 impl PgType for bool {}
@@ -43,41 +44,77 @@ extern {
     pub fn pg_free(ptr: *mut c_void);
 }
 
-/// Variable-length datatypes all share this header.
-/// The length is encoded as a `char` in C, which is equivalent
-/// to `i8`.
-///
-/// Postgres uses a workaround to have a variable-length data field in that
-/// they use a fixed-size, single-element array to fit the data. They simply
-/// allocate anough room for the real size and use the array as a pointer. This
-/// only works because the compiler doesn't verify the integrity of the size of the
-/// array. We'll simply work with a mutable pointer, instead.
-///
-/// https://github.com/postgres/postgres/blob/master/src/include/c.h#L391
+/* ----------------
+ * Variable-length datatypes all share the 'struct varlena' header.
+ *
+ * NOTE: for TOASTable types, this is an oversimplification, since the value
+ * may be compressed or moved out-of-line.  However datatype-specific routines
+ * are mostly content to deal with de-TOASTed values only, and of course
+ * client-side routines should never see a TOASTed value.  But even in a
+ * de-TOASTed value, beware of touching vl_len_ directly, as its representation
+ * is no longer convenient.  It's recommended that code always use the VARDATA,
+ * VARSIZE, and SET_VARSIZE macros instead of relying on direct mentions of
+ * the struct fields.  See postgres.h for details of the TOASTed form.
+ * ----------------
+ *
+ * struct varlena
+ * {
+ *     char	    vl_len_[4];    /* Do not touch this field directly! */
+ *     char	    vl_dat[FLEXIBLE_ARRAY_MEMBER]; /* Data content is here */
+ * };
+ *
+ * https://github.com/postgres/postgres/blob/master/src/include/c.h#L402
+ *
+ * #define SET_VARSIZE_4B(PTR,len) \
+ *     (((varattrib_4b *) (PTR))->va_4byte.va_header = (len) & 0x3FFFFFFF)
+ *
+ * https://github.com/postgres/postgres/blob/785941cdc359c6e595201ffb0df9d28f3f7173a4/src/include/postgres.h#L202
+ *
+*/
+#[derive(Debug)]
 #[repr(C)]
 pub struct Varlena {
-    len: [i8; 4],
-    data: *mut i8
+    pub len: u32,
+    pub data: [u8; 1]
 }
 
+
+
+pub trait PgConvert {
+    fn to_string(&mut self) -> String;
+}
+
+impl PgConvert for Varlena {
+    fn to_string(&mut self) -> String{
+        unsafe {
+           let size = (self.len as usize / 4) - 4;
+           String::from_raw_parts(self.data.as_mut_ptr(), size, size)
+        }
+    }
+}
+
+#[derive(Debug)]
 #[repr(C)]
 pub struct Text {
-    p: Varlena
+    pub p: Varlena
 }
 
+#[derive(Debug)]
 #[repr(C)]
 pub struct BpChar {
-    p: Varlena
+    pub p: Varlena
 }
 
+#[derive(Debug)]
 #[repr(C)]
 pub struct VarChar {
-    p: Varlena
+    pub p: Varlena
 }
 
+#[derive(Debug)]
 #[repr(C)]
 pub struct Bytea {
-    p: Varlena
+    pub p: Varlena
 }
 
 #[repr(C)]
@@ -96,6 +133,7 @@ impl<T> PgVector<T>
 
 }
 
+#[derive(Debug)]
 #[repr(C)]
 pub enum NodeTag {
     T_Invalid = 0,
