@@ -1,7 +1,6 @@
 #![feature(plugin_registrar, rustc_private)]
 #![feature(libc)]
 
-
 extern crate libc;
 extern crate syntax;
 extern crate rustc;
@@ -40,6 +39,10 @@ impl PgType for bool {}
 #[allow(dead_code)]
 extern {
     static no_such_variable: c_int;
+}
+
+#[link(name="pgcommon")]
+extern {
     pub fn pg_malloc(size: size_t) -> *mut c_void;
     pub fn pg_free(ptr: *mut c_void);
 }
@@ -87,8 +90,8 @@ pub trait PgConvert {
 impl PgConvert for Varlena {
     fn to_string(&mut self) -> String{
         unsafe {
-           let size = (self.len as usize / 4) - 4;
-           String::from_raw_parts(self.data.as_mut_ptr(), size, size)
+            let size = (self.len as usize / 4) - 4;
+            String::from_raw_parts(self.data.as_mut_ptr(), size, size)
         }
     }
 }
