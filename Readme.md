@@ -15,7 +15,7 @@ This library is fully compatible with Cargo! Just include the two crates that ar
 
 name = "is_zero"
 version = "0.0.1"
-authors = ["Daniel Fagnan <dnfagnan@gmail.com>"]
+authors = ["Daniel Fagnan <dnfagnan@gmail.com>, David Justice"]
 
 [lib]
 name = "is_zero"
